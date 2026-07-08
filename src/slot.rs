@@ -1,7 +1,3 @@
-/* This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-
 //! Named mutable slots: typed save and load of a document at a key.
 //!
 //! A slot is a mutable named cell. `save` overwrites what was there; `load`
