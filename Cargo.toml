@@ -1,0 +1,28 @@
+[package]
+name = "muniment"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MPL-2.0"
+description = "A portable persistence store: a host-supplied byte-backend seam (filesystem, OPFS, redb, fjall), typed mutable slots over a pluggable codec, and content-addressed immutable blobs. Format-agnostic and wasm-friendly. The storage floor for versioned user content; sibling to codicil (the append-only log)."
+repository = "https://github.com/mark-ik/muniment"
+keywords = ["storage", "persistence", "content-addressed", "blob", "wasm"]
+categories = ["data-structures", "filesystem"]
+
+[dependencies]
+async-trait = "0.1"
+blake3 = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+postcard = { version = "1", features = ["alloc"], optional = true }
+
+[features]
+default = ["json"]
+# A JSON codec for the typed slot store (serde_json). The friendly default.
+json = ["dep:serde_json"]
+# A deterministic postcard codec for the typed slot store.
+postcard = ["dep:postcard"]
+
+[dev-dependencies]
+pollster = "0.4"
+serde_json = "1"
