@@ -28,14 +28,17 @@ pub enum WriteOp {
 /// on desktop, OPFS in the browser, or an embedded store (redb, fjall). muniment
 /// defines the contract; it never picks a backend.
 ///
-/// `?Send` on purpose: browser OPFS on the main thread can only await JS
-/// promises, whose futures are not `Send`. Desktop and embedded backends do
-/// their I/O synchronously and return ready futures, so this bound costs them
-/// nothing. Consumers `.await` in whatever context they already have.
+/// The async bound is platform-split: `Send` on native, `?Send` on wasm. Browser
+/// OPFS on the main thread can only await JS promises, whose futures are not
+/// `Send`, so the wasm build relaxes the bound. Native backends (filesystem,
+/// redb) do their I/O synchronously and return `Send` futures, so native
+/// consumers get the stronger bound and can drive a store from a work-stealing
+/// task, which the LogSync drain needs. Same source, one `cfg` seam.
 ///
 /// Keys are opaque strings. muniment's stores namespace them (`blob/<hash>`,
 /// a consumer's own slot names); a backend treats them as flat byte keys.
-#[async_trait(?Send)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Backend {
     /// The bytes at `key`, or `None` if absent.
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError>;
@@ -112,7 +115,8 @@ impl MemoryBackend {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Backend for MemoryBackend {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         Ok(self.map.lock().unwrap().get(key).cloned())
@@ -173,6 +177,20 @@ impl Backend for MemoryBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Native invariant: a backend's method futures are `Send`, so a store built
+    /// over one can be driven from a work-stealing task (the LogSync drain needs
+    /// this). The wasm build relaxes to `?Send` for OPFS, so this only asserts on
+    /// native. Compile-time: the body never has to run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn backend_futures_are_send_on_native() {
+        fn assert_send<T: Send>(_: T) {}
+        let b = MemoryBackend::new();
+        assert_send(b.get("k"));
+        assert_send(b.put("k", b"v"));
+        assert_send(b.apply(&[]));
+    }
 
     /// A backend seeded with two logs, entries inserted out of order.
     fn seed() -> MemoryBackend {

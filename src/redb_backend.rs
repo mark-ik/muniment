@@ -54,7 +54,8 @@ impl RedbBackend {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Backend for RedbBackend {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let read = self.db.begin_read().map_err(backend)?;
