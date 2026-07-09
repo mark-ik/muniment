@@ -27,6 +27,8 @@ pub mod backend;
 pub mod blob;
 pub mod codec;
 pub mod error;
+#[cfg(feature = "redb")]
+pub mod redb_backend;
 pub mod slot;
 
 pub use backend::{Backend, MemoryBackend, WriteOp};
@@ -34,6 +36,9 @@ pub use blob::{BlobStore, Hash};
 pub use codec::Codec;
 pub use error::StoreError;
 pub use slot::SlotStore;
+
+#[cfg(feature = "redb")]
+pub use redb_backend::RedbBackend;
 
 #[cfg(feature = "json")]
 pub use codec::JsonCodec;

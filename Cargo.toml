@@ -14,6 +14,11 @@ blake3 = "1.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 postcard = { version = "1", features = ["alloc"], optional = true }
+# The durable desktop backend. redb is an embedded key/value store with native
+# ordered ranges (which `scan` maps onto directly) and single-writer
+# transactions (which `apply` commits in). Optional: the browser build never
+# pulls it, reaching for OPFS instead.
+redb = { version = "2", optional = true }
 
 [features]
 default = ["json"]
@@ -21,7 +26,11 @@ default = ["json"]
 json = ["dep:serde_json"]
 # A deterministic postcard codec for the typed slot store.
 postcard = ["dep:postcard"]
+# The redb-backed [`RedbBackend`], the durable desktop store.
+redb = ["dep:redb"]
 
 [dev-dependencies]
 pollster = "0.4"
 serde_json = "1"
+# A scratch directory for the redb backend's on-disk round-trip tests.
+tempfile = "3"
