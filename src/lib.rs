@@ -29,7 +29,7 @@ pub mod codec;
 pub mod error;
 pub mod slot;
 
-pub use backend::{Backend, MemoryBackend};
+pub use backend::{Backend, MemoryBackend, WriteOp};
 pub use blob::{BlobStore, Hash};
 pub use codec::Codec;
 pub use error::StoreError;
