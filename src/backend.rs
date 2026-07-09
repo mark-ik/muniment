@@ -55,38 +55,30 @@ pub trait Backend {
     /// Keys in the half-open lexicographic range `[start, end)`, in **ascending
     /// order**. This is the ordered read a log needs: a per-author log lives at
     /// contiguous fixed-width keys, so `[lo, hi)` returns its entries in `seq`
-    /// order. The default filters and sorts [`list`](Backend::list); a backend
-    /// with a native ordered index (redb ranges, IndexedDB cursors) overrides it.
-    async fn scan(&self, start: &str, end: &str) -> Result<Vec<String>, StoreError> {
-        let mut keys: Vec<String> = self
-            .list("")
-            .await?
-            .into_iter()
-            .filter(|k| k.as_str() >= start && k.as_str() < end)
-            .collect();
-        keys.sort();
-        Ok(keys)
-    }
+    /// order. Implementations back this with a native ordered index (redb ranges,
+    /// IndexedDB cursors), or filter and sort [`list`](Backend::list) where none
+    /// exists.
+    ///
+    /// Required rather than defaulted: a defaulted async method's future would
+    /// borrow `&self` under the native `Send` bound and so demand `Self: Sync`
+    /// from every generic caller. Keeping it required frees consumers of that
+    /// bound, and both shipped backends have a real ordered read anyway.
+    async fn scan(&self, start: &str, end: &str) -> Result<Vec<String>, StoreError>;
 
     /// Apply a batch of writes **atomically**: every op lands, or none does.
     ///
     /// One store write can touch several keys (an operation's payload blob plus
-    /// its log-index entry), and a reader must never see half of it. The default
-    /// applies the ops in order — safe when the writes are content-addressed or
-    /// idempotent, so a crash mid-batch leaves only recoverable orphans — and a
-    /// transactional backend (redb, an IndexedDB object-store transaction)
-    /// overrides it with a real all-or-nothing commit. The whole batch arrives in
-    /// one call, so a backend issues every write in a single transaction / tick
+    /// its log-index entry), and a reader must never see half of it. A
+    /// transactional backend (redb, an IndexedDB object-store transaction) commits
+    /// the batch in one transaction; a backend without transactions applies the
+    /// ops in order, safe when the writes are content-addressed or idempotent (a
+    /// crash mid-batch leaves only recoverable orphans). The whole batch arrives
+    /// in one call, so a backend issues every write in a single transaction / tick
     /// with no caller-controlled await between ops.
-    async fn apply(&self, ops: &[WriteOp]) -> Result<(), StoreError> {
-        for op in ops {
-            match op {
-                WriteOp::Put { key, value } => self.put(key, value).await?,
-                WriteOp::Delete { key } => self.delete(key).await?,
-            }
-        }
-        Ok(())
-    }
+    ///
+    /// Required, not defaulted, for the same reason as [`scan`](Backend::scan): a
+    /// default body would leak a `Self: Sync` bound to every generic caller.
+    async fn apply(&self, ops: &[WriteOp]) -> Result<(), StoreError>;
 }
 
 /// An in-memory [`Backend`], the deterministic test and development floor. Not
