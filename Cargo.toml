@@ -19,6 +19,10 @@ postcard = { version = "1", features = ["alloc"], optional = true }
 # transactions (which `apply` commits in). Optional: the browser build never
 # pulls it, reaching for OPFS instead.
 redb = { version = "2", optional = true }
+# The portable, inspectable desktop backend. A zip archive whose entries are the
+# store's keys, so a consumer that names keys after files produces an archive
+# anyone can unzip. `Stored` only (no codec dependency). Optional; native-only.
+zip = { version = "2", default-features = false, optional = true }
 
 [features]
 default = ["json"]
@@ -28,6 +32,8 @@ json = ["dep:serde_json"]
 postcard = ["dep:postcard"]
 # The redb-backed [`RedbBackend`], the durable desktop store.
 redb = ["dep:redb"]
+# The zip-archive [`ZipBackend`], the portable, inspectable desktop store.
+zip = ["dep:zip"]
 
 [dev-dependencies]
 pollster = "0.4"

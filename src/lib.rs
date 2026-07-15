@@ -30,6 +30,8 @@ pub mod error;
 #[cfg(feature = "redb")]
 pub mod redb_backend;
 pub mod slot;
+#[cfg(feature = "zip")]
+pub mod zip_backend;
 
 pub use backend::{Backend, MemoryBackend, WriteOp};
 pub use blob::{BlobStore, Hash};
@@ -39,6 +41,9 @@ pub use slot::SlotStore;
 
 #[cfg(feature = "redb")]
 pub use redb_backend::RedbBackend;
+
+#[cfg(feature = "zip")]
+pub use zip_backend::ZipBackend;
 
 #[cfg(feature = "json")]
 pub use codec::JsonCodec;
