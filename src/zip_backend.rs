@@ -16,6 +16,13 @@
 //!
 //! Native only, behind the `zip` feature: it uses filesystem paths. The browser
 //! reaches for an OPFS-backed store instead, the same split as redb.
+//!
+//! Single-writer: there is no cross-process file lock. One process serializes
+//! its own writes through the internal mutex, but two processes that opened the
+//! same archive each rewrite the whole file, so the later writer's snapshot wins
+//! and the earlier one's changes are lost. That fits a project-file model where
+//! one app instance owns a file at a time; a consumer needing concurrent writers
+//! wants a transactional backend (redb), not this one.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
@@ -76,7 +83,12 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
     let mut entries = BTreeMap::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(backend)?;
-        if entry.is_dir() {
+        // Zip marks a "directory" by a trailing '/' with no content. Skip only
+        // those empty markers: an opaque key that happens to end in '/' carries
+        // bytes and must round-trip. (A genuinely empty-valued key ending in '/'
+        // is indistinguishable from a directory marker in the zip format and is
+        // the one key shape not guaranteed to survive a reopen.)
+        if entry.is_dir() && entry.size() == 0 {
             continue;
         }
         let name = entry.name().to_string();
@@ -87,11 +99,16 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
     Ok(entries)
 }
 
-/// Serialize `entries` to a zip archive and atomically replace `path`.
+/// Serialize `entries` to a zip archive and atomically, durably replace `path`.
 ///
 /// Entries write in `BTreeMap` order, so an unchanged map produces a byte-stable
 /// archive. `Stored` (no compression) keeps the dependency free of a codec; a
 /// consumer that wants smaller files can layer its own compression in the value.
+///
+/// Durability: the temp file is `fsync`ed before the rename, so a crash or power
+/// loss cannot leave the target name pointing at unwritten blocks, and the parent
+/// directory is `fsync`ed after (unix) so the rename itself survives. A failure
+/// at any step removes the temp file rather than leaving it beside the archive.
 fn write_entries(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(), StoreError> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -104,10 +121,40 @@ fn write_entries(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(),
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".muniment-zip-{}-{}.tmp", std::process::id(), counter));
-    std::fs::write(&tmp, &buffer).map_err(backend)?;
-    std::fs::rename(&tmp, path).map_err(backend)?;
+
+    if let Err(error) = write_synced(&tmp, &buffer) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(backend(error));
+    }
+    sync_parent_dir(path);
     Ok(())
 }
+
+/// Write bytes to `tmp` and flush them to stable storage before it is used.
+fn write_synced(tmp: &Path, buffer: &[u8]) -> Result<(), StoreError> {
+    let mut file = std::fs::File::create(tmp).map_err(backend)?;
+    file.write_all(buffer).map_err(backend)?;
+    file.sync_all().map_err(backend)?;
+    Ok(())
+}
+
+/// Flush the directory entry created by the rename. Unix-only; a best-effort
+/// durability step, so failures here are not surfaced.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -116,16 +163,33 @@ impl Backend for ZipBackend {
         Ok(self.inner.lock().unwrap().entries.get(key).cloned())
     }
 
+    /// Atomic: the in-memory map is rolled back if the archive rewrite fails, so
+    /// a failed `put` leaves both disk and memory as they were.
     async fn put(&self, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.entries.insert(key.to_string(), bytes.to_vec());
-        write_entries(&inner.path, &inner.entries)
+        let previous = inner.entries.insert(key.to_string(), bytes.to_vec());
+        if let Err(error) = write_entries(&inner.path, &inner.entries) {
+            match previous {
+                Some(old) => inner.entries.insert(key.to_string(), old),
+                None => inner.entries.remove(key),
+            };
+            return Err(error);
+        }
+        Ok(())
     }
 
+    /// Atomic like `put`. Deleting an absent key is a no-op that touches neither
+    /// disk nor memory, so it never rewrites the archive.
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.entries.remove(key);
-        write_entries(&inner.path, &inner.entries)
+        let Some(previous) = inner.entries.remove(key) else {
+            return Ok(());
+        };
+        if let Err(error) = write_entries(&inner.path, &inner.entries) {
+            inner.entries.insert(key.to_string(), previous);
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
@@ -139,6 +203,12 @@ impl Backend for ZipBackend {
     }
 
     async fn scan(&self, start: &str, end: &str) -> Result<Vec<String>, StoreError> {
+        // A degenerate or inverted range is empty, matching MemoryBackend.
+        // Guarding here also avoids `BTreeMap::range` panicking on `start > end`,
+        // which would poison the shared mutex.
+        if start >= end {
+            return Ok(Vec::new());
+        }
         let inner = self.inner.lock().unwrap();
         Ok(inner
             .entries
@@ -262,6 +332,39 @@ mod tests {
             assert_eq!(b.get("media/x.wav").await.unwrap(), Some(b"body".to_vec()));
             assert_eq!(b.get("drop").await.unwrap(), None);
             assert_eq!(b.get("keep").await.unwrap(), Some(b"v".to_vec()));
+        });
+    }
+
+    #[test]
+    fn scan_with_an_inverted_range_is_empty_not_a_panic() {
+        pollster::block_on(async {
+            let (_dir, b) = temp_backend();
+            for k in ["a", "m", "z"] {
+                b.put(k, b"v").await.unwrap();
+            }
+            // Inverted range: BTreeMap::range would panic (poisoning the shared
+            // mutex); the backend must return empty like MemoryBackend does.
+            assert!(b.scan("z", "a").await.unwrap().is_empty());
+            // The backend is still usable afterward — the mutex is not poisoned.
+            assert_eq!(b.get("m").await.unwrap(), Some(b"v".to_vec()));
+        });
+    }
+
+    #[test]
+    fn a_content_key_ending_in_slash_round_trips() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("store.zip");
+            {
+                let b = ZipBackend::open(&path).unwrap();
+                b.put("campaign/", b"data").await.unwrap();
+                b.put("media/a.wav", b"audio").await.unwrap();
+            }
+            // A key ending in '/' but carrying bytes must survive a reopen; only
+            // empty directory markers are skipped.
+            let reopened = ZipBackend::open(&path).unwrap();
+            assert_eq!(reopened.get("campaign/").await.unwrap(), Some(b"data".to_vec()));
+            assert_eq!(reopened.get("media/a.wav").await.unwrap(), Some(b"audio".to_vec()));
         });
     }
 
