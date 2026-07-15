@@ -21,8 +21,12 @@ postcard = { version = "1", features = ["alloc"], optional = true }
 redb = { version = "2", optional = true }
 # The portable, inspectable desktop backend. A zip archive whose entries are the
 # store's keys, so a consumer that names keys after files produces an archive
-# anyone can unzip. `Stored` only (no codec dependency). Optional; native-only.
-zip = { version = "2", default-features = false, optional = true }
+# anyone can unzip. `deflate` gives Deflate with the pure-Rust miniz_oxide
+# encoder (wasm-friendly); it also pulls the pure-Rust zopfli crate, which we do
+# not invoke at runtime. Optional; native-only.
+zip = { version = "2", default-features = false, features = [
+    "deflate",
+], optional = true }
 
 [features]
 default = ["json"]

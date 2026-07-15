@@ -12,7 +12,9 @@
 //! rename). That suits a consumer that saves an entire bundle at once through
 //! [`apply`](Backend::apply); it is the wrong backend for high-frequency
 //! incremental appends, which should use redb. Reads (`get`, `list`, `scan`)
-//! serve from the in-memory map, so they are cheap.
+//! serve from the in-memory map, so they are cheap. Entries are Deflate-
+//! compressed (miniz_oxide), so structured and silence-heavy values shrink while
+//! staying readable by any zip tool.
 //!
 //! Native only, behind the `zip` feature: it uses filesystem paths. The browser
 //! reaches for an OPFS-backed store instead, the same split as redb.
@@ -102,8 +104,9 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
 /// Serialize `entries` to a zip archive and atomically, durably replace `path`.
 ///
 /// Entries write in `BTreeMap` order, so an unchanged map produces a byte-stable
-/// archive. `Stored` (no compression) keeps the dependency free of a codec; a
-/// consumer that wants smaller files can layer its own compression in the value.
+/// archive. `Deflated` (miniz_oxide) is deterministic and universally readable;
+/// it shrinks structured entries and any silence-heavy data a lot while leaving
+/// dense binary payloads near their original size.
 ///
 /// Durability: the temp file is `fsync`ed before the rename, so a crash or power
 /// loss cannot leave the target name pointing at unwritten blocks, and the parent
@@ -111,7 +114,7 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
 /// at any step removes the temp file rather than leaving it beside the archive.
 fn write_entries(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(), StoreError> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, bytes) in entries {
         writer.start_file(name.as_str(), options).map_err(backend)?;
         writer.write_all(bytes).map_err(backend)?;
