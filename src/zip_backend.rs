@@ -104,9 +104,10 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
 /// Serialize `entries` to a zip archive and atomically, durably replace `path`.
 ///
 /// Entries write in `BTreeMap` order, so an unchanged map produces a byte-stable
-/// archive. `Deflated` (miniz_oxide) is deterministic and universally readable;
-/// it shrinks structured entries and any silence-heavy data a lot while leaving
-/// dense binary payloads near their original size.
+/// archive. Compression is chosen per entry (see [`worth_deflating`]): structured
+/// or repetitive data is `Deflated` (miniz_oxide, deterministic and universally
+/// readable), while already-compressed payloads (e.g. WavPack media) are `Stored`
+/// to skip the wasted compression pass. Both methods are readable by any zip tool.
 ///
 /// Durability: the temp file is `fsync`ed before the rename, so a crash or power
 /// loss cannot leave the target name pointing at unwritten blocks, and the parent
@@ -114,8 +115,13 @@ fn read_entries(path: &Path) -> Result<BTreeMap<String, Vec<u8>>, StoreError> {
 /// at any step removes the temp file rather than leaving it beside the archive.
 fn write_entries(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(), StoreError> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, bytes) in entries {
+        let method = if worth_deflating(bytes) {
+            CompressionMethod::Deflated
+        } else {
+            CompressionMethod::Stored
+        };
+        let options = SimpleFileOptions::default().compression_method(method);
         writer.start_file(name.as_str(), options).map_err(backend)?;
         writer.write_all(bytes).map_err(backend)?;
     }
@@ -135,6 +141,35 @@ fn write_entries(path: &Path, entries: &BTreeMap<String, Vec<u8>>) -> Result<(),
     }
     sync_parent_dir(path);
     Ok(())
+}
+
+/// Cheap estimate of whether an entry is worth Deflate-compressing, so we don't
+/// spend a full compression pass on data that is already compressed (WavPack
+/// media, images, etc.). Uses the Shannon entropy of a prefix as a proxy: near
+/// 8 bits/byte means high-entropy (incompressible) data, store it as-is; lower
+/// means structure Deflate can exploit. This only affects size/CPU, never
+/// correctness (both methods round-trip), so an occasional wrong guess is fine.
+fn worth_deflating(data: &[u8]) -> bool {
+    // Tiny entries: the header overhead dominates either way; just deflate.
+    if data.len() < 256 {
+        return true;
+    }
+    let sample = &data[..data.len().min(16384)];
+    let mut hist = [0u32; 256];
+    for &b in sample {
+        hist[b as usize] += 1;
+    }
+    let n = sample.len() as f64;
+    let entropy: f64 = hist
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum();
+    // Below ~7.5 bits/byte there is usually enough redundancy for Deflate to win.
+    entropy < 7.5
 }
 
 /// Write bytes to `tmp` and flush them to stable storage before it is used.
@@ -368,6 +403,47 @@ mod tests {
             let reopened = ZipBackend::open(&path).unwrap();
             assert_eq!(reopened.get("campaign/").await.unwrap(), Some(b"data".to_vec()));
             assert_eq!(reopened.get("media/a.wav").await.unwrap(), Some(b"audio".to_vec()));
+        });
+    }
+
+    #[test]
+    fn incompressible_entries_are_stored_compressible_ones_deflated() {
+        pollster::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("mixed.zip");
+
+            // High-entropy bytes (a simple LCG), incompressible like WavPack media.
+            let mut noise = vec![0u8; 40_000];
+            let mut x: u32 = 0x1234_5678;
+            for b in noise.iter_mut() {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *b = (x >> 24) as u8;
+            }
+            // Structured, repetitive bytes that Deflate crushes.
+            let structured = vec![b'a'; 40_000];
+
+            {
+                let store = ZipBackend::open(&path).unwrap();
+                store.put("media/x.wv", &noise).await.unwrap();
+                store.put("manifest.cbor", &structured).await.unwrap();
+            }
+
+            // Both round-trip regardless of method.
+            let store = ZipBackend::open(&path).unwrap();
+            assert_eq!(store.get("media/x.wv").await.unwrap().unwrap(), noise);
+            assert_eq!(store.get("manifest.cbor").await.unwrap().unwrap(), structured);
+
+            // Inspect the real zip: the noise entry is Stored, the structured one
+            // Deflated and much smaller.
+            let file = std::fs::File::open(&path).unwrap();
+            let mut archive = ZipArchive::new(file).unwrap();
+            let noise_entry = archive.by_name("media/x.wv").unwrap();
+            assert_eq!(noise_entry.compression(), ::zip::CompressionMethod::Stored);
+            assert!(noise_entry.compressed_size() >= noise.len() as u64);
+            drop(noise_entry);
+            let struct_entry = archive.by_name("manifest.cbor").unwrap();
+            assert_eq!(struct_entry.compression(), ::zip::CompressionMethod::Deflated);
+            assert!(struct_entry.compressed_size() < structured.len() as u64 / 10);
         });
     }
 
