@@ -26,7 +26,7 @@ promises, while desktop backends return ready futures and pay nothing. muniment
 defines the seam and ships only an in-memory backend; the host supplies the real
 one. It moves bytes and does not model what they mean.
 
-Built from a survey of four consumers (woodshed, strophe, isometry, mere), each
+Built from a survey of four consumers (woodshed, hocket, isometry, mere), each
 of which was hand-rolling this seam. Sibling to
 [codicil](https://github.com/mark-ik/codicil), the append-only log that versions
 what muniment stores. See [`design_docs/`](design_docs/).
